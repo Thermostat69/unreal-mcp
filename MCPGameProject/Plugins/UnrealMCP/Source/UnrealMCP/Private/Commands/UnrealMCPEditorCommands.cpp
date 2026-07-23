@@ -180,6 +180,9 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActor(const TShared
 
     FActorSpawnParameters SpawnParams;
     SpawnParams.Name = *ActorName;
+    // Default NameMode is Required_Fatal: colliding with a not-yet-GC'd (e.g. just
+    // deleted) actor of the same name would hard-crash the whole editor.
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
 
     if (ActorType == TEXT("StaticMeshActor"))
     {
@@ -206,18 +209,20 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActor(const TShared
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown actor type: %s"), *ActorType));
     }
 
-    if (NewActor)
+    if (!NewActor)
     {
-        // Set scale (since SpawnActor only takes location and rotation)
-        FTransform Transform = NewActor->GetTransform();
-        Transform.SetScale3D(Scale);
-        NewActor->SetActorTransform(Transform);
-
-        // Return the created actor's details
-        return FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(
+            TEXT("Spawn of '%s' returned null - the name may still be blocked by a previously deleted actor (blocked until GC/editor restart). Use a different name."),
+            *ActorName));
     }
 
-    return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create actor"));
+    // Set scale (since SpawnActor only takes location and rotation)
+    FTransform Transform = NewActor->GetTransform();
+    Transform.SetScale3D(Scale);
+    NewActor->SetActorTransform(Transform);
+
+    // Return the created actor's details
+    return FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteActor(const TSharedPtr<FJsonObject>& Params)
@@ -463,6 +468,8 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
 
     FActorSpawnParameters SpawnParams;
     SpawnParams.Name = *ActorName;
+    // See HandleSpawnActor: never let a name collision fatally crash the editor
+    SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
 
     AActor* NewActor = World->SpawnActor<AActor>(Blueprint->GeneratedClass, SpawnTransform, SpawnParams);
     if (NewActor)
@@ -470,7 +477,9 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnBlueprintActor(cons
         return FUnrealMCPCommonUtils::ActorToJsonObject(NewActor, true);
     }
 
-    return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to spawn blueprint actor"));
+    return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(
+        TEXT("Failed to spawn blueprint actor '%s' - the name may still be blocked by a previously deleted actor (blocked until GC/editor restart). Use a different name."),
+        *ActorName));
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleFocusViewport(const TSharedPtr<FJsonObject>& Params)
