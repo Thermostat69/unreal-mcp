@@ -31,4 +31,15 @@ private:
     // Editor viewport commands
     TSharedPtr<FJsonObject> HandleFocusViewport(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleTakeScreenshot(const TSharedPtr<FJsonObject>& Params);
-}; 
+
+    // Level / session commands
+    TSharedPtr<FJsonObject> HandleSaveAll(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleStartPie(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleStopPie(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleExecConsoleCommand(const TSharedPtr<FJsonObject>& Params);
+
+    // Asset commands
+    TSharedPtr<FJsonObject> HandleListAssets(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAssetExists(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleDeleteAsset(const TSharedPtr<FJsonObject>& Params);
+};

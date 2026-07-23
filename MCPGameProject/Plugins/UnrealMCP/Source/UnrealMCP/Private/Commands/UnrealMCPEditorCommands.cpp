@@ -20,6 +20,9 @@
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "FileHelpers.h"
+#include "Settings/LevelEditorPlaySettings.h"
+#include "EditorAssetLibrary.h"
 
 FUnrealMCPEditorCommands::FUnrealMCPEditorCommands()
 {
@@ -74,7 +77,37 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     {
         return HandleTakeScreenshot(Params);
     }
-    
+    // Level / session commands
+    else if (CommandType == TEXT("save_all"))
+    {
+        return HandleSaveAll(Params);
+    }
+    else if (CommandType == TEXT("start_pie"))
+    {
+        return HandleStartPie(Params);
+    }
+    else if (CommandType == TEXT("stop_pie"))
+    {
+        return HandleStopPie(Params);
+    }
+    else if (CommandType == TEXT("exec_console_command"))
+    {
+        return HandleExecConsoleCommand(Params);
+    }
+    // Asset commands
+    else if (CommandType == TEXT("list_assets"))
+    {
+        return HandleListAssets(Params);
+    }
+    else if (CommandType == TEXT("asset_exists"))
+    {
+        return HandleAssetExists(Params);
+    }
+    else if (CommandType == TEXT("delete_asset"))
+    {
+        return HandleDeleteAsset(Params);
+    }
+
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown editor command: %s"), *CommandType));
 }
 
@@ -186,31 +219,47 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSpawnActor(const TShared
     // deleted) actor of the same name would hard-crash the whole editor.
     SpawnParams.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ErrorAndReturnNull;
 
+    // Well-known shortcuts first, anything else through the generic class resolver
+    UClass* SpawnClass = nullptr;
     if (ActorType == TEXT("StaticMeshActor"))
     {
-        NewActor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Location, Rotation, SpawnParams);
+        SpawnClass = AStaticMeshActor::StaticClass();
     }
     else if (ActorType == TEXT("PointLight"))
     {
-        NewActor = World->SpawnActor<APointLight>(APointLight::StaticClass(), Location, Rotation, SpawnParams);
+        SpawnClass = APointLight::StaticClass();
     }
     else if (ActorType == TEXT("SpotLight"))
     {
-        NewActor = World->SpawnActor<ASpotLight>(ASpotLight::StaticClass(), Location, Rotation, SpawnParams);
+        SpawnClass = ASpotLight::StaticClass();
     }
     else if (ActorType == TEXT("DirectionalLight"))
     {
-        NewActor = World->SpawnActor<ADirectionalLight>(ADirectionalLight::StaticClass(), Location, Rotation, SpawnParams);
+        SpawnClass = ADirectionalLight::StaticClass();
     }
     else if (ActorType == TEXT("CameraActor"))
     {
-        NewActor = World->SpawnActor<ACameraActor>(ACameraActor::StaticClass(), Location, Rotation, SpawnParams);
+        SpawnClass = ACameraActor::StaticClass();
     }
     else
     {
-        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown actor type: %s"), *ActorType));
+        FString ResolveError;
+        SpawnClass = FUnrealMCPCommonUtils::ResolveClassByName(ActorType, ResolveError);
+        if (!SpawnClass)
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown actor type '%s': %s"), *ActorType, *ResolveError));
+        }
+        if (!SpawnClass->IsChildOf(AActor::StaticClass()))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Class '%s' is not an Actor class"), *SpawnClass->GetPathName()));
+        }
+        if (SpawnClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Class '%s' is abstract or deprecated and cannot be spawned"), *SpawnClass->GetPathName()));
+        }
     }
 
+    NewActor = World->SpawnActor<AActor>(SpawnClass, Location, Rotation, SpawnParams);
     if (!NewActor)
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(
@@ -608,4 +657,181 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleTakeScreenshot(const TSh
     }
     
     return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to take screenshot"));
-} 
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSaveAll(const TSharedPtr<FJsonObject>& Params)
+{
+    // Silent save of every dirty package (maps + assets). bFastSave also skips
+    // source-control checkout dialogs - a modal on the GameThread would stall
+    // the bridge past the client timeout.
+    const bool bSaved = FEditorFileUtils::SaveDirtyPackages(
+        /*bPromptUserToSave=*/false,
+        /*bSaveMapPackages=*/true,
+        /*bSaveContentPackages=*/true,
+        /*bFastSave=*/true);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("saved"), bSaved);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleStartPie(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("GEditor is not available"));
+    }
+    if (GEditor->PlayWorld)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("A PIE session is already running - call stop_pie first"));
+    }
+
+    int32 NumPlayers = 1;
+    if (Params->HasField(TEXT("num_players")))
+    {
+        NumPlayers = FMath::Clamp(static_cast<int32>(Params->GetNumberField(TEXT("num_players"))), 1, 4);
+    }
+
+    FString NetModeString = TEXT("standalone");
+    Params->TryGetStringField(TEXT("net_mode"), NetModeString);
+
+    EPlayNetMode NetMode = EPlayNetMode::PIE_Standalone;
+    if (NetModeString == TEXT("listen") || NetModeString == TEXT("listen_server"))
+    {
+        NetMode = EPlayNetMode::PIE_ListenServer;
+    }
+    else if (NetModeString == TEXT("client"))
+    {
+        NetMode = EPlayNetMode::PIE_Client;
+    }
+    else if (NetModeString != TEXT("standalone"))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(
+            TEXT("Unknown net_mode '%s' (use 'standalone', 'listen' or 'client')"), *NetModeString));
+    }
+
+    // The PIE request reads the play-settings default object - same path the toolbar uses
+    ULevelEditorPlaySettings* PlaySettings = GetMutableDefault<ULevelEditorPlaySettings>();
+    PlaySettings->SetPlayNumberOfClients(NumPlayers);
+    PlaySettings->SetPlayNetMode(NetMode);
+
+    FRequestPlaySessionParams SessionParams;
+    GEditor->RequestPlaySession(SessionParams);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("requested"), true);
+    ResultObj->SetNumberField(TEXT("num_players"), NumPlayers);
+    ResultObj->SetStringField(TEXT("net_mode"), NetModeString);
+    ResultObj->SetStringField(TEXT("note"), TEXT("PIE starts on the next editor tick - poll the log or stop_pie when done"));
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleStopPie(const TSharedPtr<FJsonObject>& Params)
+{
+    if (!GEditor)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("GEditor is not available"));
+    }
+
+    const bool bWasPlaying = GEditor->PlayWorld != nullptr;
+    if (bWasPlaying)
+    {
+        GEditor->RequestEndPlayMap();
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetBoolField(TEXT("was_playing"), bWasPlaying);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleExecConsoleCommand(const TSharedPtr<FJsonObject>& Params)
+{
+    FString Command;
+    if (!Params->TryGetStringField(TEXT("command"), Command) || Command.TrimStartAndEnd().IsEmpty())
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'command' parameter"));
+    }
+
+    if (!GEditor || !GEngine)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("GEditor/GEngine are not available"));
+    }
+
+    // Prefer the running PIE world so gameplay cvars/exec commands land in the game
+    UWorld* TargetWorld = GEditor->PlayWorld ? GEditor->PlayWorld.Get() : GEditor->GetEditorWorldContext().World();
+    if (!TargetWorld)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No world available to execute the command in"));
+    }
+
+    const bool bHandled = GEngine->Exec(TargetWorld, *Command);
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("command"), Command);
+    ResultObj->SetBoolField(TEXT("handled"), bHandled);
+    ResultObj->SetStringField(TEXT("world"), TargetWorld->GetName());
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleListAssets(const TSharedPtr<FJsonObject>& Params)
+{
+    FString Directory = TEXT("/Game");
+    Params->TryGetStringField(TEXT("directory"), Directory);
+
+    bool bRecursive = true;
+    if (Params->HasField(TEXT("recursive")))
+    {
+        bRecursive = Params->GetBoolField(TEXT("recursive"));
+    }
+
+    const TArray<FString> AssetPaths = UEditorAssetLibrary::ListAssets(Directory, bRecursive, /*bIncludeFolder=*/false);
+
+    TArray<TSharedPtr<FJsonValue>> AssetArray;
+    for (const FString& AssetPath : AssetPaths)
+    {
+        AssetArray.Add(MakeShared<FJsonValueString>(AssetPath));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("directory"), Directory);
+    ResultObj->SetArrayField(TEXT("assets"), AssetArray);
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleAssetExists(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("asset_path"), AssetPath);
+    ResultObj->SetBoolField(TEXT("exists"), UEditorAssetLibrary::DoesAssetExist(AssetPath));
+    return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteAsset(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+    }
+
+    if (!UEditorAssetLibrary::DoesAssetExist(AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset does not exist: %s"), *AssetPath));
+    }
+
+    const bool bDeleted = UEditorAssetLibrary::DeleteAsset(AssetPath);
+    if (!bDeleted)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Failed to delete asset: %s"), *AssetPath));
+    }
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("deleted_asset"), AssetPath);
+    return ResultObj;
+}

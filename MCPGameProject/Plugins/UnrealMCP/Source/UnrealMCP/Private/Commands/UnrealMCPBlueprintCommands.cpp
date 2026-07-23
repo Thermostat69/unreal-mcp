@@ -20,6 +20,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
+#include "BlueprintEditorLibrary.h"
 
 FUnrealMCPBlueprintCommands::FUnrealMCPBlueprintCommands()
 {
@@ -63,7 +64,11 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCommand(const FString
     {
         return HandleSetPawnProperties(Params);
     }
-    
+    else if (CommandType == TEXT("reparent_blueprint"))
+    {
+        return HandleReparentBlueprint(Params);
+    }
+
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown blueprint command: %s"), *CommandType));
 }
 
@@ -129,6 +134,63 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
     }
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create blueprint"));
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleReparentBlueprint(const TSharedPtr<FJsonObject>& Params)
+{
+    FString BlueprintName;
+    if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+    }
+
+    FString NewParentName;
+    if (!Params->TryGetStringField(TEXT("new_parent_class"), NewParentName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'new_parent_class' parameter"));
+    }
+
+    UBlueprint* Blueprint = FUnrealMCPCommonUtils::FindBlueprint(BlueprintName);
+    if (!Blueprint)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintName));
+    }
+
+    FString ResolveError;
+    UClass* NewParentClass = FUnrealMCPCommonUtils::ResolveClassByName(NewParentName, ResolveError);
+    if (!NewParentClass)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(ResolveError);
+    }
+
+    if (Blueprint->GeneratedClass && NewParentClass->IsChildOf(Blueprint->GeneratedClass))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Cannot reparent %s to its own child class %s"), *BlueprintName, *NewParentClass->GetName()));
+    }
+
+    const FString OldParentPath = Blueprint->ParentClass ? Blueprint->ParentClass->GetPathName() : TEXT("None");
+
+    if (Blueprint->ParentClass != NewParentClass)
+    {
+        UBlueprintEditorLibrary::ReparentBlueprint(Blueprint, NewParentClass);
+    }
+
+    // Recompile so placed instances get reinstanced with the new hierarchy
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+    const bool bCompiledClean = Blueprint->Status == BS_UpToDate || Blueprint->Status == BS_UpToDateWithWarnings;
+
+    TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+    ResultObj->SetStringField(TEXT("name"), BlueprintName);
+    ResultObj->SetStringField(TEXT("old_parent"), OldParentPath);
+    ResultObj->SetStringField(TEXT("new_parent"), NewParentClass->GetPathName());
+    ResultObj->SetBoolField(TEXT("compiled"), bCompiledClean);
+    if (!bCompiledClean)
+    {
+        ResultObj->SetStringField(TEXT("warning"), TEXT("Blueprint has compile errors after reparenting - open it in the editor to inspect"));
+    }
+    return ResultObj;
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleAddComponentToBlueprint(const TSharedPtr<FJsonObject>& Params)
