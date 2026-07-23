@@ -65,10 +65,13 @@ def register_editor_tools(mcp: FastMCP):
             response = unreal.send_command("find_actors_by_name", {
                 "pattern": pattern
             })
-            
+
             if not response:
                 return []
-                
+
+            # The bridge wraps payloads as {"status": ..., "result": {"actors": [...]}}
+            if "result" in response and "actors" in response["result"]:
+                return response["result"]["actors"]
             return response.get("actors", [])
             
         except Exception as e:
