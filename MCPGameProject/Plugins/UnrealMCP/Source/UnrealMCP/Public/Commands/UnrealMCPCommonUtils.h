@@ -39,6 +39,18 @@ public:
     // Blueprint utilities
     static UBlueprint* FindBlueprint(const FString& BlueprintName);
     static UBlueprint* FindBlueprintByName(const FString& BlueprintName);
+
+    /**
+     * Resolve a class from a user-supplied name. Accepts:
+     *  - full object paths:  "/Script/MyGame.MyActor", "/Script/Engine.PlayerStart",
+     *    "/Game/Blueprints/BP_MyActor.BP_MyActor_C" (also without the ".ObjectName" part)
+     *  - short native names with or without prefix: "MyActor", "AMyActor", "PlayerStart"
+     *  - short Blueprint class names: "BP_MyActor" or "BP_MyActor_C" (searched loaded
+     *    classes first, then /Game/Blueprints/<Name>)
+     * Never falls back silently: returns nullptr and fills OutError when unresolved.
+     * REINST_/TRASHCLASS_/SKEL_ classes are skipped.
+     */
+    static UClass* ResolveClassByName(const FString& ClassName, FString& OutError);
     static UEdGraph* FindOrCreateEventGraph(UBlueprint* Blueprint);
     
     // Blueprint node utilities

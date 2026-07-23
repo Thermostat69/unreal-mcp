@@ -25,6 +25,7 @@
 #include "BlueprintActionDatabase.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Misc/PackageName.h"
 
 // JSON Utilities
 TSharedPtr<FJsonObject> FUnrealMCPCommonUtils::CreateErrorResponse(const FString& Message)
@@ -155,6 +156,99 @@ UBlueprint* FUnrealMCPCommonUtils::FindBlueprintByName(const FString& BlueprintN
 {
     FString AssetPath = TEXT("/Game/Blueprints/") + BlueprintName;
     return LoadObject<UBlueprint>(nullptr, *AssetPath);
+}
+
+namespace
+{
+    // REINST_/TRASHCLASS_/SKEL_ classes are compiler leftovers, never valid targets
+    bool IsUsableClass(const UClass* Class)
+    {
+        if (!Class)
+        {
+            return false;
+        }
+        const FString Name = Class->GetName();
+        return !Name.StartsWith(TEXT("REINST_")) &&
+               !Name.StartsWith(TEXT("TRASHCLASS_")) &&
+               !Name.StartsWith(TEXT("SKEL_")) &&
+               !Class->HasAnyClassFlags(CLASS_NewerVersionExists);
+    }
+}
+
+UClass* FUnrealMCPCommonUtils::ResolveClassByName(const FString& InClassName, FString& OutError)
+{
+    const FString ClassName = InClassName.TrimStartAndEnd();
+    if (ClassName.IsEmpty())
+    {
+        OutError = TEXT("Class name is empty");
+        return nullptr;
+    }
+
+    // Full object path: try as class first, then as Blueprint asset
+    if (ClassName.StartsWith(TEXT("/")))
+    {
+        if (UClass* Loaded = LoadObject<UClass>(nullptr, *ClassName))
+        {
+            if (IsUsableClass(Loaded))
+            {
+                return Loaded;
+            }
+        }
+
+        FString AssetPath = ClassName;
+        if (!AssetPath.Contains(TEXT(".")))
+        {
+            AssetPath += TEXT(".") + FPackageName::GetShortName(AssetPath);
+        }
+        if (UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *AssetPath))
+        {
+            if (BP->GeneratedClass && IsUsableClass(BP->GeneratedClass))
+            {
+                return BP->GeneratedClass;
+            }
+        }
+
+        OutError = FString::Printf(TEXT("No class found at path '%s' (tried as UClass and as Blueprint asset)"), *ClassName);
+        return nullptr;
+    }
+
+    // Short name: exact, without A/U prefix, with _C suffix (covers native + loaded BP classes)
+    TArray<FString> Candidates;
+    Candidates.Add(ClassName);
+    if (ClassName.Len() > 1 &&
+        (ClassName[0] == TEXT('A') || ClassName[0] == TEXT('U')) &&
+        FChar::IsUpper(ClassName[1]))
+    {
+        Candidates.Add(ClassName.RightChop(1));
+    }
+    if (!ClassName.EndsWith(TEXT("_C")))
+    {
+        Candidates.Add(ClassName + TEXT("_C"));
+    }
+
+    for (const FString& Candidate : Candidates)
+    {
+        UClass* Found = FindFirstObject<UClass>(*Candidate, EFindFirstObjectOptions::None, ELogVerbosity::NoLogging, TEXT("ResolveClassByName"));
+        if (IsUsableClass(Found))
+        {
+            return Found;
+        }
+    }
+
+    // Unloaded Blueprint under the conventional folder
+    if (UBlueprint* BP = FindBlueprintByName(ClassName))
+    {
+        if (BP->GeneratedClass && IsUsableClass(BP->GeneratedClass))
+        {
+            return BP->GeneratedClass;
+        }
+    }
+
+    OutError = FString::Printf(
+        TEXT("Class '%s' not found. Tried the exact name, without A/U prefix, with '_C', and /Game/Blueprints/%s. ")
+        TEXT("For native classes you can pass a full path like '/Script/MyGame.%s'."),
+        *ClassName, *ClassName, *ClassName);
+    return nullptr;
 }
 
 UEdGraph* FUnrealMCPCommonUtils::FindOrCreateEventGraph(UBlueprint* Blueprint)

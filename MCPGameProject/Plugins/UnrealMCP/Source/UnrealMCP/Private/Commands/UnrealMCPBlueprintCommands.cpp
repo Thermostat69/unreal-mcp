@@ -86,59 +86,27 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
 
     // Create the blueprint factory
     UBlueprintFactory* Factory = NewObject<UBlueprintFactory>();
-    
+
     // Handle parent class
     FString ParentClass;
     Params->TryGetStringField(TEXT("parent_class"), ParentClass);
-    
-    // Default to Actor if no parent class specified
+
+    // Default to Actor only when NO parent was requested. A requested-but-unresolved
+    // parent is a hard error — the old silent AActor fallback produced hollow hulls.
     UClass* SelectedParentClass = AActor::StaticClass();
-    
-    // Try to find the specified parent class
     if (!ParentClass.IsEmpty())
     {
-        FString ClassName = ParentClass;
-        if (!ClassName.StartsWith(TEXT("A")))
+        FString ResolveError;
+        UClass* FoundClass = FUnrealMCPCommonUtils::ResolveClassByName(ParentClass, ResolveError);
+        if (!FoundClass)
         {
-            ClassName = TEXT("A") + ClassName;
+            return FUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Parent class not resolved, blueprint NOT created: %s"), *ResolveError));
         }
-        
-        // First try direct StaticClass lookup for common classes
-        UClass* FoundClass = nullptr;
-        if (ClassName == TEXT("APawn"))
-        {
-            FoundClass = APawn::StaticClass();
-        }
-        else if (ClassName == TEXT("AActor"))
-        {
-            FoundClass = AActor::StaticClass();
-        }
-        else
-        {
-            // Try loading the class using LoadClass which is more reliable than FindObject
-            const FString ClassPath = FString::Printf(TEXT("/Script/Engine.%s"), *ClassName);
-            FoundClass = LoadClass<AActor>(nullptr, *ClassPath);
-            
-            if (!FoundClass)
-            {
-                // Try alternate paths if not found
-                const FString GameClassPath = FString::Printf(TEXT("/Script/Game.%s"), *ClassName);
-                FoundClass = LoadClass<AActor>(nullptr, *GameClassPath);
-            }
-        }
-
-        if (FoundClass)
-        {
-            SelectedParentClass = FoundClass;
-            UE_LOG(LogTemp, Log, TEXT("Successfully set parent class to '%s'"), *ClassName);
-        }
-        else
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Could not find specified parent class '%s' at paths: /Script/Engine.%s or /Script/Game.%s, defaulting to AActor"), 
-                *ClassName, *ClassName, *ClassName);
-        }
+        SelectedParentClass = FoundClass;
+        UE_LOG(LogTemp, Log, TEXT("create_blueprint: parent class '%s' resolved to '%s'"), *ParentClass, *FoundClass->GetPathName());
     }
-    
+
     Factory->ParentClass = SelectedParentClass;
 
     // Create the blueprint
@@ -156,6 +124,7 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
         TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
         ResultObj->SetStringField(TEXT("name"), AssetName);
         ResultObj->SetStringField(TEXT("path"), PackagePath + AssetName);
+        ResultObj->SetStringField(TEXT("parent_class"), SelectedParentClass->GetPathName());
         return ResultObj;
     }
 
