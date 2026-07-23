@@ -26,6 +26,9 @@ logger = logging.getLogger("UnrealMCP")
 # Configuration
 UNREAL_HOST = "127.0.0.1"
 UNREAL_PORT = 55557
+# Commands like save_all, compile_blueprint or reparent_blueprint can easily take
+# longer than the old 5s window - they block until the editor finishes the work.
+UNREAL_RESPONSE_TIMEOUT = 30
 
 class UnrealConnection:
     """Connection to an Unreal Engine instance."""
@@ -81,7 +84,7 @@ class UnrealConnection:
     def receive_full_response(self, sock, buffer_size=4096) -> bytes:
         """Receive a complete response from Unreal, handling chunked data."""
         chunks = []
-        sock.settimeout(5)  # 5 second timeout
+        sock.settimeout(UNREAL_RESPONSE_TIMEOUT)
         try:
             while True:
                 chunk = sock.recv(buffer_size)
@@ -301,19 +304,32 @@ def info():
 
     ## Editor Tools
     ### Viewport and Screenshots
-    - `focus_viewport(target, location, distance, orientation)` - Focus viewport
-    - `take_screenshot(filename, show_ui, resolution)` - Capture screenshots
+    - `take_screenshot(filepath)` - Save a PNG of the active editor/PIE viewport
+
+    ### Session and Level
+    - `save_all()` - Save all dirty maps and assets without prompts
+    - `start_pie(num_players=1, net_mode="standalone"|"listen"|"client")` - Start Play-In-Editor
+    - `stop_pie()` - End the PIE session
+    - `exec_console_command(command)` - Run a console command (cvars, stat, debug toggles)
+
+    ### Asset Management
+    - `list_assets(directory="/Game", recursive=True)` - List asset paths
+    - `asset_exists(asset_path)` - Check if an asset exists
+    - `delete_asset(asset_path)` - Delete an asset (destructive!)
 
     ### Actor Management
     - `get_actors_in_level()` - List all actors in current level
-    - `find_actors_by_name(pattern)` - Find actors by name pattern
+    - `find_actors_by_name(pattern)` - Find actors by name or label pattern
     - `spawn_actor(name, type, location=[0,0,0], rotation=[0,0,0], scale=[1,1,1])` - Create actors
-    - `delete_actor(name)` - Remove actors
+      (type: built-ins like StaticMeshActor/PointLight or ANY class: "PlayerStart", "MyActor", "/Script/MyGame.MyActor")
+    - `delete_actor(name)` - Remove actors (the name stays blocked until GC/editor restart!)
     - `set_actor_transform(name, location, rotation, scale)` - Modify actor transform
     - `get_actor_properties(name)` - Get actor properties
-    
+
     ## Blueprint Management
     - `create_blueprint(name, parent_class)` - Create new Blueprint classes
+      (parent_class resolves project C++ classes, engine classes and paths; errors instead of falling back to Actor)
+    - `reparent_blueprint(blueprint_name, new_parent_class)` - Change a Blueprint's parent class and recompile
     - `add_component_to_blueprint(blueprint_name, component_type, component_name)` - Add components
     - `set_static_mesh_properties(blueprint_name, component_name, static_mesh)` - Configure meshes
     - `set_physics_properties(blueprint_name, component_name)` - Configure physics
